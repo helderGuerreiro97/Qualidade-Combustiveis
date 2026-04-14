@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Resolvedor Flexível de Diagramas de Blocos</title>
+  <style>
+    :root { --bg:#0b1020; --card:#141b33; --ink:#e8edff; --muted:#a9b5e6; --acc:#6ea8fe; --ok:#4cd27a; --err:#ff6b6b; }
+    *{box-sizing:border-box;font-family:Inter,Segoe UI,Arial,sans-serif}
+    body{margin:0;background:linear-gradient(130deg,#0b1020,#131a34);color:var(--ink)}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    .card{background:rgba(20,27,51,.94);border:1px solid #2b3667;border-radius:14px;padding:18px;margin-bottom:16px}
+    h1{margin:0 0 8px;font-size:1.5rem}
+    p,li{color:var(--muted)}
+    code,textarea,input,select,button{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    textarea{width:100%;min-height:220px;background:#0e1430;color:#eaf0ff;border:1px solid #3a477f;border-radius:10px;padding:12px;resize:vertical}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    label{display:block;font-size:.9rem;color:#c9d3ff;margin-bottom:6px}
+    input,select{width:100%;padding:10px;background:#0e1430;color:#eaf0ff;border:1px solid #3a477f;border-radius:10px}
+    button{background:var(--acc);border:none;border-radius:10px;padding:11px 14px;color:#07112a;font-weight:700;cursor:pointer}
+    button:hover{filter:brightness(1.08)}
+    .out{background:#0e1430;border:1px solid #3a477f;border-radius:10px;padding:12px;white-space:pre-wrap;word-break:break-word}
+    .ok{color:var(--ok)} .err{color:var(--err)}
+    .small{font-size:.9rem}
+    @media (max-width: 800px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>Resolvedor Flexível de Diagramas de Blocos</h1>
+      <p>Este arquivo é <strong>somente HTML</strong> (com CSS/JS embutidos) e aceita diagramas personalizados, sem depender de modelos fixos.</p>
+      <ul>
+        <li>Você define os nós e conexões livremente.</li>
+        <li>O solver monta as equações nodais e resolve simbolicamente.</li>
+        <li>Funciona com malhas, caminhos paralelos e blocos arbitrários.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <label for="graph">Defina o diagrama (uma conexão por linha): <strong>origem -> destino : ganho</strong></label>
+      <textarea id="graph">R -> E : 1
+E -> Gc : Gc(s)
+Gc -> Gp : Gp(s)
+Gp -> C : 1
+C -> H : H(s)
+H -> E : -1</textarea>
+      <p class="small">Exemplo de ganho numérico: <code>2.5</code>. Exemplo simbólico: <code>(s+2)/(s+5)</code>, <code>-K</code>.</p>
+
+      <div class="grid" style="margin-top:12px">
+        <div>
+          <label for="inputNode">Nó de entrada (referência)</label>
+          <input id="inputNode" value="R" />
+        </div>
+        <div>
+          <label for="outputNode">Nó de saída</label>
+          <input id="outputNode" value="C" />
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+        <button id="solveBtn">Resolver T(s) = Saída/Entrada</button>
+        <button id="demo2Btn" type="button">Carregar demo paralela</button>
+        <button id="demo3Btn" type="button">Carregar demo malha interna</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 style="margin-top:0">Resultado</h2>
+      <div id="status" class="small"></div>
+      <div id="result" class="out">Clique em “Resolver”.</div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    const isZero = (x) => x === "0";
+    const isOne = (x) => x === "1";
+    const add = (a,b)=> isZero(a)?b : isZero(b)?a : `(${a}+${b})`;
+    const sub = (a,b)=> isZero(b)?a : `(${a}-${b})`;
+    const mul = (a,b)=> (isZero(a)||isZero(b))?"0" : isOne(a)?b : isOne(b)?a : `(${a}*${b})`;
+    const div = (a,b)=> isZero(a)?"0" : isOne(b)?a : `(${a})/(${b})`;
+
+    function parseGraph(text) {
+      const edges = [];
+      const nodes = new Set();
+      const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+      for (const line of lines) {
+        const m = line.match(/^([^\-:>]+?)\s*->\s*([^:]+?)\s*:\s*(.+)$/);
+        if (!m) throw new Error(`Linha inválida: "${line}"`);
+        const from = m[1].trim();
+        const to = m[2].trim();
+        const gain = m[3].trim();
+        if (!from || !to || !gain) throw new Error(`Linha incompleta: "${line}"`);
+        nodes.add(from); nodes.add(to);
+        edges.push({ from, to, gain });
+      }
+      return { edges, nodes: [...nodes] };
+    }
+
+    function buildSystem(nodes, edges, inputNode, outputNode) {
+      if (!nodes.includes(inputNode)) throw new Error(`Nó de entrada "${inputNode}" não encontrado.`);
+      if (!nodes.includes(outputNode)) throw new Error(`Nó de saída "${outputNode}" não encontrado.`);
+
+      const unknowns = nodes.filter(n => n !== inputNode);
+      const idx = Object.fromEntries(unknowns.map((n, i) => [n, i]));
+      const n = unknowns.length;
+      const A = Array.from({ length: n }, () => Array.from({ length: n }, () => "0"));
+      const b = Array.from({ length: n }, () => "0");
+
+      for (const v of unknowns) {
+        const r = idx[v];
+        A[r][r] = "1";
+        const incoming = edges.filter(e => e.to === v);
+        for (const e of incoming) {
+          if (e.from === inputNode) {
+            b[r] = add(b[r], e.gain);
+          } else if (idx[e.from] !== undefined) {
+            A[r][idx[e.from]] = sub(A[r][idx[e.from]], e.gain);
+          }
+        }
+      }
+
+      if (outputNode === inputNode) return { direct: "1", unknowns, A, b };
+      return { direct: null, unknowns, A, b };
+    }
+
+    function solveSymbolic(A, b) {
+      const n = A.length;
+      const M = A.map((row, i) => [...row, b[i]]);
+      for (let col = 0; col < n; col++) {
+        let pivot = col;
+        while (pivot < n && isZero(M[pivot][col])) pivot++;
+        if (pivot === n) throw new Error("Sistema singular: não foi possível resolver (pivot nulo).");
+        if (pivot !== col) [M[pivot], M[col]] = [M[col], M[pivot]];
+
+        for (let r = col + 1; r < n; r++) {
+          if (isZero(M[r][col])) continue;
+          const factor = div(M[r][col], M[col][col]);
+          for (let c = col; c <= n; c++) {
+            M[r][c] = sub(M[r][c], mul(factor, M[col][c]));
+          }
+        }
+      }
+
+      const x = Array.from({ length: n }, () => "0");
+      for (let i = n - 1; i >= 0; i--) {
+        let s = M[i][n];
+        for (let j = i + 1; j < n; j++) s = sub(s, mul(M[i][j], x[j]));
+        x[i] = div(s, M[i][i]);
+      }
+      return x;
+    }
+
+    function solve() {
+      const result = $("result");
+      const status = $("status");
+      status.textContent = "";
+      try {
+        const { edges, nodes } = parseGraph($("graph").value);
+        const inputNode = $("inputNode").value.trim();
+        const outputNode = $("outputNode").value.trim();
+        const sys = buildSystem(nodes, edges, inputNode, outputNode);
+
+        let tf;
+        if (sys.direct) {
+          tf = sys.direct;
+        } else {
+          const x = solveSymbolic(sys.A, sys.b);
+          const outIdx = sys.unknowns.indexOf(outputNode);
+          if (outIdx === -1) throw new Error("Saída inválida após montagem do sistema.");
+          tf = x[outIdx];
+        }
+
+        result.textContent = `T(s) = ${outputNode}/${inputNode} = ${tf}`;
+        status.innerHTML = `<span class="ok">✔ Diagrama resolvido com sucesso para estrutura personalizada.</span>`;
+      } catch (e) {
+        status.innerHTML = `<span class="err">✖ ${e.message}</span>`;
+        result.textContent = "Não foi possível resolver. Verifique o formato das linhas e os nomes dos nós.";
+      }
+    }
+
+    $("solveBtn").addEventListener("click", solve);
+
+    $("demo2Btn").addEventListener("click", () => {
+      $("graph").value = `R -> D : 1\nD -> G1 : G1(s)\nD -> G2 : G2(s)\nG1 -> C : 1\nG2 -> C : 1`;
+      $("inputNode").value = "R";
+      $("outputNode").value = "C";
+    });
+
+    $("demo3Btn").addEventListener("click", () => {
+      $("graph").value = `R -> E : 1\nE -> Gc : Gc(s)\nGc -> P1 : P1(s)\nP1 -> P2 : P2(s)\nP2 -> C : 1\nC -> H1 : H1(s)\nH1 -> E : -1\nP1 -> H2 : H2(s)\nH2 -> E : -1`;
+      $("inputNode").value = "R";
+      $("outputNode").value = "C";
+    });
+  </script>
+</body>
+</html>
